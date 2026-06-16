@@ -22,11 +22,40 @@ from utils.data_loader import load_listings
 
 load_dotenv()
 _GROQ_MODEL = "llama-3.3-70b-versatile"
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "for",
+    "i",
+    "im",
+    "in",
+    "is",
+    "it",
+    "like",
+    "looking",
+    "me",
+    "my",
+    "of",
+    "on",
+    "please",
+    "something",
+    "that",
+    "the",
+    "to",
+    "want",
+    "with",
+}
 
 
 def _tokenize(text: str) -> set[str]:
     """Normalize free text into lowercase search tokens."""
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if token not in _STOPWORDS
+    }
 
 
 def _size_matches(listing_size: str, requested_size: str) -> bool:
@@ -68,6 +97,35 @@ def _call_groq(prompt: str, temperature: float) -> str:
         ],
     )
     return (completion.choices[0].message.content or "").strip()
+
+
+def _score_listing(listing: dict, query_tokens: set[str], raw_description: str) -> int:
+    """Score a listing with higher weight on title and style-tag matches."""
+    title_tokens = _tokenize(listing["title"])
+    description_tokens = _tokenize(listing["description"])
+    category_tokens = _tokenize(listing["category"])
+    style_tokens = _tokenize(" ".join(listing["style_tags"]))
+    color_tokens = _tokenize(" ".join(listing["colors"]))
+    brand_tokens = _tokenize(listing["brand"] or "")
+
+    score = 0
+    score += len(query_tokens & title_tokens) * 4
+    score += len(query_tokens & style_tokens) * 3
+    score += len(query_tokens & category_tokens) * 2
+    score += len(query_tokens & description_tokens)
+    score += len(query_tokens & color_tokens)
+    score += len(query_tokens & brand_tokens)
+
+    raw_query = raw_description.lower().strip()
+    title_text = listing["title"].lower()
+    style_text = " ".join(listing["style_tags"]).lower()
+
+    if raw_query and raw_query in title_text:
+        score += 8
+    elif raw_query and raw_query in style_text:
+        score += 5
+
+    return score
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -128,18 +186,7 @@ def search_listings(
         if size is not None and not _size_matches(listing["size"], size):
             continue
 
-        searchable_text = " ".join(
-            [
-                listing["title"],
-                listing["description"],
-                listing["category"],
-                " ".join(listing["style_tags"]),
-                " ".join(listing["colors"]),
-                listing["brand"] or "",
-            ]
-        )
-        listing_tokens = _tokenize(searchable_text)
-        score = len(query_tokens & listing_tokens)
+        score = _score_listing(listing, query_tokens, description)
 
         if score == 0:
             continue

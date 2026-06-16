@@ -25,6 +25,16 @@ def test_search_returns_empty_list_when_no_matches():
     assert results == []
 
 
+def test_search_prioritizes_true_graphic_tee_matches():
+    results = search_listings("looking for a vintage graphic tee", size=None, max_price=30)
+
+    assert len(results) > 0
+    assert "tee" in results[0]["title"].lower()
+    assert "graphic" in (
+        results[0]["title"].lower() + " " + " ".join(results[0]["style_tags"]).lower()
+    )
+
+
 def test_suggest_outfit_uses_general_styling_for_empty_wardrobe(monkeypatch):
     monkeypatch.setattr(
         "tools._call_groq",
