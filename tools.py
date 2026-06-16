@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -20,6 +21,53 @@ from groq import Groq
 from utils.data_loader import load_listings
 
 load_dotenv()
+_GROQ_MODEL = "llama-3.3-70b-versatile"
+
+
+def _tokenize(text: str) -> set[str]:
+    """Normalize free text into lowercase search tokens."""
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _size_matches(listing_size: str, requested_size: str) -> bool:
+    """Allow flexible matching such as M against S/M or M/L."""
+    listing_normalized = listing_size.lower()
+    requested_normalized = requested_size.lower().strip()
+    return (
+        requested_normalized in listing_normalized
+        or listing_normalized in requested_normalized
+    )
+
+
+def _format_listing(item: dict) -> str:
+    """Format a listing dict into a compact prompt-friendly summary."""
+    brand = item.get("brand") or "Unknown brand"
+    return (
+        f"{item['title']} | category: {item['category']} | size: {item['size']} | "
+        f"price: ${item['price']:.2f} | colors: {', '.join(item['colors'])} | "
+        f"style tags: {', '.join(item['style_tags'])} | brand: {brand} | "
+        f"platform: {item['platform']} | description: {item['description']}"
+    )
+
+
+def _call_groq(prompt: str, temperature: float) -> str:
+    """Call Groq chat completions and return the stripped text response."""
+    client = _get_groq_client()
+    completion = client.chat.completions.create(
+        model=_GROQ_MODEL,
+        temperature=temperature,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are FitFindr, a stylist for secondhand fashion. "
+                    "Be concrete, tasteful, and natural."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return (completion.choices[0].message.content or "").strip()
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -69,8 +117,43 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+    query_tokens = _tokenize(description)
+    scored_results: list[tuple[int, dict]] = []
+
+    for listing in listings:
+        if max_price is not None and listing["price"] > max_price:
+            continue
+
+        if size is not None and not _size_matches(listing["size"], size):
+            continue
+
+        searchable_text = " ".join(
+            [
+                listing["title"],
+                listing["description"],
+                listing["category"],
+                " ".join(listing["style_tags"]),
+                " ".join(listing["colors"]),
+                listing["brand"] or "",
+            ]
+        )
+        listing_tokens = _tokenize(searchable_text)
+        score = len(query_tokens & listing_tokens)
+
+        if score == 0:
+            continue
+
+        scored_results.append((score, listing))
+
+    scored_results.sort(
+        key=lambda result: (
+            -result[0],
+            result[1]["price"],
+            result[1]["title"].lower(),
+        )
+    )
+    return [listing for _, listing in scored_results]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +183,73 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    wardrobe_items = wardrobe.get("items", [])
+    item_summary = _format_listing(new_item)
+
+    if not wardrobe_items:
+        prompt = f"""
+You are helping a user style a secondhand item without access to their closet.
+
+New item:
+{item_summary}
+
+Write 1 to 2 short outfit suggestions in natural language.
+- Give general styling advice with basics a person may already own.
+- Mention bottoms, shoes, and optional layer or accessory ideas.
+- Keep it practical and specific to the item's vibe.
+- Do not mention that data is missing.
+"""
+        try:
+            response = _call_groq(prompt, temperature=0.6)
+            if response:
+                return response
+        except Exception:
+            pass
+
+        return (
+            f"Try the {new_item['title']} with relaxed denim or trousers, simple shoes, "
+            "and one easy layer so the thrifted piece stays the focus."
+        )
+
+    wardrobe_summary = "\n".join(
+        [
+            (
+                f"- {item['name']} | category: {item['category']} | "
+                f"colors: {', '.join(item['colors'])} | "
+                f"style tags: {', '.join(item['style_tags'])} | "
+                f"notes: {item.get('notes') or 'None'}"
+            )
+            for item in wardrobe_items
+        ]
+    )
+
+    prompt = f"""
+You are styling a thrifted item using the user's real wardrobe pieces.
+
+New item:
+{item_summary}
+
+Wardrobe items:
+{wardrobe_summary}
+
+Write 1 to 2 outfit suggestions.
+- Explicitly name the wardrobe pieces you are using.
+- Build complete looks with tops/bottoms/shoes and optional layers or accessories.
+- Explain the vibe briefly.
+- Keep the response under 140 words total.
+"""
+    try:
+        response = _call_groq(prompt, temperature=0.7)
+        if response:
+            return response
+    except Exception:
+        pass
+
+    featured_items = ", ".join(item["name"] for item in wardrobe_items[:3])
+    return (
+        f"Style the {new_item['title']} with pieces you already own like {featured_items}. "
+        "Build one look around contrast in shape and another around matching its overall vibe."
+    )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +281,37 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return "I couldn't create a fit card because no outfit suggestion was available yet."
+
+    brand = new_item.get("brand") or "an unbranded find"
+    prompt = f"""
+Write a 2 to 4 sentence social caption for a thrifted outfit post.
+
+Item details:
+- title: {new_item['title']}
+- price: ${new_item['price']:.2f}
+- platform: {new_item['platform']}
+- brand: {brand}
+- colors: {', '.join(new_item['colors'])}
+
+Outfit idea:
+{outfit}
+
+Requirements:
+- Sound casual and authentic, not like a product listing.
+- Mention the item title, price, and platform exactly once each in a natural way.
+- Capture the outfit vibe with specific language.
+- Do not use hashtags or bullet points.
+"""
+    try:
+        response = _call_groq(prompt, temperature=1.0)
+        if response:
+            return response
+    except Exception:
+        pass
+
+    return (
+        f"Found the {new_item['title']} on {new_item['platform']} for ${new_item['price']:.2f} "
+        f"and built the whole look around it. {outfit.strip()}"
+    )

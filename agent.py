@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -92,9 +94,81 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    normalized_query = query.strip()
+    price_match = re.search(
+        r"(?:under|below|less than)\s*\$?(\d+(?:\.\d+)?)|\$(\d+(?:\.\d+)?)",
+        normalized_query,
+        re.IGNORECASE,
+    )
+    size_match = re.search(
+        r"(?:size|fits like|in size)\s+([A-Za-z0-9/.\-]+)",
+        normalized_query,
+        re.IGNORECASE,
+    )
+
+    max_price = None
+    if price_match:
+        max_price = float(price_match.group(1) or price_match.group(2))
+
+    size = size_match.group(1) if size_match else None
+
+    description = re.sub(
+        r"(?:under|below|less than)\s*\$?\d+(?:\.\d+)?",
+        "",
+        normalized_query,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(
+        r"\$\d+(?:\.\d+)?",
+        "",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(
+        r"(?:size|fits like|in size)\s+[A-Za-z0-9/.\-]+",
+        "",
+        description,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(r"\s+", " ", description).strip(" ,.")
+
+    session["parsed"] = {
+        "description": description or normalized_query,
+        "size": size,
+        "max_price": max_price,
+    }
+
+    results = search_listings(
+        description=session["parsed"]["description"],
+        size=session["parsed"]["size"],
+        max_price=session["parsed"]["max_price"],
+    )
+    session["search_results"] = results
+
+    if not results:
+        session["error"] = (
+            "I couldn't find a listing that matched that description, size, and budget. "
+            "Try broadening the item description, removing the size, or increasing the price limit."
+        )
+        return session
+
+    session["selected_item"] = results[0]
+    session["outfit_suggestion"] = suggest_outfit(session["selected_item"], wardrobe)
+
+    if not session["outfit_suggestion"] or not session["outfit_suggestion"].strip():
+        session["error"] = "I found an item, but I couldn't generate an outfit suggestion."
+        return session
+
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"],
+        session["selected_item"],
+    )
+
+    if session["fit_card"].startswith("I couldn't create a fit card"):
+        session["error"] = session["fit_card"]
+
     return session
 
 
