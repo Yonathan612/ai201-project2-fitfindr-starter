@@ -114,4 +114,4 @@ Run the current test suite with:
 
 ## Known limitation
 
-The search ranking is functional but still simple. For some queries, a loosely related top may outrank the most intuitive fashion match. Improving relevance ranking is the next highest-value polish step before a final demo.
+The query parser in `agent.py` is regex-based, so very unusual phrasing may extract size or price less accurately than direct wording like `"size M under $30"`. The main tool flow, state passing, and error branches still work correctly.
